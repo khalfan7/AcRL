@@ -67,13 +67,6 @@ T_in += dT
 
 **HVACControlEnv** - Gymnasium wrapper for RL training.
 
-| Component | Specification |
-|-----------|---------------|
-| `action_space` | `Box(-1, 1, shape=(1,))` - continuous HVAC control |
-| `observation_space` | `Box([-50,-1], [50,1], shape=(2,))` - [temp_error, outdoor_norm] |
-| Reward | `-abs(indoor_temp - setpoint)` - minimize comfort deviation |
-| Episode length | 288 steps (24h at 5-min intervals) |
-
 | Method | Description |
 |--------|-------------|
 | `reset(seed)` | Reset simulator, return (observation, info) |
