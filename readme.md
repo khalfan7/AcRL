@@ -1,11 +1,5 @@
 # DRL-Based HVAC Control for a Single-Zone Smart Building
 
-> **ML709 Project Implementation**  
-
-## Project Description
-
-This project implements **Deep Reinforcement Learning (DRL) for HVAC control** in a single-zone smart building. The goal is to minimize energy consumption while maintaining occupant comfort within acceptable temperature bounds.
-
 ### ML709 Project Requirements
 
 | Requirement | Implementation |
