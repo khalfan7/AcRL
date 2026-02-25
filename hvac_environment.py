@@ -17,12 +17,16 @@ class HVACControlEnv(gym.Env):
         setpoint_temp: float = 22.0,
         outdoor_temp_base: float = 30.0,
         outdoor_temp_amplitude: float = 5.0,
+        lambda_weight: float = 0.1,
         render_mode=None,
     ):
         super().__init__()
         
         self.render_mode = render_mode
-        
+        # Energy-penalty weight: trades off comfort vs. power usage
+        # R = -|temp_error| - lambda_weight * |action|
+        self.lambda_weight = lambda_weight
+
         # Create thermal zone simulator
         self.simulator = ThermalZoneSimulator(
             thermal_capacitance=thermal_capacitance,
@@ -43,10 +47,19 @@ class HVACControlEnv(gym.Env):
             dtype=np.float32
         )
         
-        # Define observation space: [temp_error, outdoor_temp_normalized]
+        # Define observation space:
+        #   [temp_error, outdoor_temp_normalized, sin_time, cos_time]
+        #
+        # sin/cos encode the hour-of-day cyclically:
+        #   midnight  -> sin=0,  cos=+1
+        #   06:00     -> sin=+1, cos=0   
+        #   noon      -> sin=0,  cos=-1  
+        #   18:00     -> sin=-1, cos=0   
+        #
+        # Night windows assumed: 00-06 and 18-24
         self.observation_space = spaces.Box(
-            low=np.array([-50.0, -1.0], dtype=np.float32),
-            high=np.array([50.0, 1.0], dtype=np.float32),
+            low=np.array([-50.0, -1.0, -1.0, -1.0], dtype=np.float32),
+            high=np.array([ 50.0,  1.0,  1.0,  1.0], dtype=np.float32),
             dtype=np.float32
         )
 
@@ -73,9 +86,13 @@ class HVACControlEnv(gym.Env):
         # Get observation
         observation = self._get_observation()
         
-        # Calculate reward: negative absolute error (encourages minimizing error)
+        # Reward: penalise both temperature deviation and energy use
+        #   R = -|temp_error| - λ·|action|
+        # lambda_weight << 1 keeps comfort as the primary objective while
+        # discouraging unnecessary full-power operation.
         temperature_error = abs(indoor_temp - self.simulator.setpoint_temp)
-        reward = -temperature_error
+        energy_penalty    = self.lambda_weight * abs(action_value)
+        reward = -temperature_error - energy_penalty
         
         # Episode termination
         terminated = done
@@ -96,8 +113,17 @@ class HVACControlEnv(gym.Env):
             max(self.simulator.outdoor_temp_amplitude, 1.0)
         )
         outdoor_temp_normalized = np.clip(outdoor_temp_normalized, -1.0, 1.0)
-        
-        return np.array([temperature_error, outdoor_temp_normalized], dtype=np.float32)
+
+   
+        hour = self.simulator.elapsed_hours % 24.0
+        angle = 2.0 * np.pi * hour / 24.0
+        sin_time = float(np.sin(angle))   # +1 at 06:00, -1 at 18:00
+        cos_time = float(np.cos(angle))   # +1 at 00:00, -1 at 12:00
+
+        return np.array(
+            [temperature_error, outdoor_temp_normalized, sin_time, cos_time],
+            dtype=np.float32,
+        )
 
     def _get_info(self) -> dict:
         return self.simulator.get_state()
@@ -117,9 +143,11 @@ class HVACControlEnv(gym.Env):
         pass
 
 
-# Register the environment with Gymnasium
-gym.register(
-    id='HVACControl-v0',
-    entry_point='hvac_environment:HVACControlEnv',
-    max_episode_steps=288,  # 24 hours at 5 min intervals
-)
+# Register the environment with Gymnasium — guarded so repeated imports
+# (or imports from different scripts) don't raise a duplicate-id error.
+if "HVACControl-v0" not in gym.envs.registration.registry:
+    gym.register(
+        id="HVACControl-v0",
+        entry_point="hvac_environment:HVACControlEnv",
+        max_episode_steps=288,  # 24 hours at 5 min intervals
+    )

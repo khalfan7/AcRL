@@ -55,8 +55,17 @@ class ThermalZoneSimulator:
             self.outdoor_temp_array[midpoint:] = self.outdoor_temp_base + self.outdoor_temp_amplitude
         elif self.outdoor_temp_profile == 'sinusoidal':
             period = 24 * 3600
-            phase = -np.pi / 2 - (15 / 24) * 2 * np.pi
-            self.outdoor_temp_array = self.outdoor_temp_base + self.outdoor_temp_amplitude * np.sin(2 * np.pi * time_array / period + phase)
+
+            # Peak at 15:00 (3 PM) — standard for many thermal models.
+            # Math: we want (2π·t/24 + phase) = π/2 at t = peak_hour
+            peak_hour = 15.0
+            phase = (np.pi / 2) - (2 * np.pi * peak_hour / 24)
+
+            self.outdoor_temp_array = (
+                self.outdoor_temp_base
+                + self.outdoor_temp_amplitude
+                * np.sin(2 * np.pi * time_array / period + phase)
+            )
         else:
             raise ValueError(f"Unknown outdoor_temp_profile: {self.outdoor_temp_profile}")
 

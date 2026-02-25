@@ -18,7 +18,7 @@ if __name__ == '__main__':
     # Config
     n_envs = 8
     total_timesteps = 500_000
-    log_dir = 'results/SAC'
+    log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'results', 'SAC')
     os.makedirs(log_dir, exist_ok=True)
 
     # Vectorized envs
@@ -54,7 +54,7 @@ if __name__ == '__main__':
         tensorboard_log=log_dir,
     )
 
-    model.learn(total_timesteps=total_timesteps, callback=eval_callback)
+    model.learn(total_timesteps=total_timesteps, callback=eval_callback, log_interval=1, progress_bar=True)
     model.save(f'{log_dir}/final_model')
     env.save(f'{log_dir}/vecnormalize.pkl')
     env.close()
