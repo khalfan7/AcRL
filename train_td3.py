@@ -1,10 +1,15 @@
 """
-Train TD3 agent for HVAC control using StableBaselines3
+Train TD3 agent for HVAC control using StableBaselines3.
 
-TD3 (Twin Delayed DDPG) is an off-policy algorithm that improves DDPG with:
-- Clipped double Q-learning
-- Delayed policy updates  
-- Target policy smoothing
+TD3 (Twin Delayed DDPG) is an off-policy deterministic algorithm that
+improves upon DDPG with three key tricks:
+  1. Clipped double Q-learning  — reduces over-estimation bias
+  2. Delayed policy updates     — actor updated every 2 critic steps
+  3. Target policy smoothing    — adds noise to target actions
+
+As an off-policy algorithm, TD3 uses a single environment with a replay
+buffer.  Gaussian action noise is added during data collection for
+exploration.
 """
 
 import os
@@ -12,7 +17,7 @@ import numpy as np
 from stable_baselines3 import TD3
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import VecNormalize
-from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
 from stable_baselines3.common.noise import NormalActionNoise
 from hvac_environment import HVACControlEnv
 
@@ -21,39 +26,52 @@ def make_env():
     return HVACControlEnv()
 
 
-if __name__ == '__main__':
-    # Config
+class SyncNormCallback(BaseCallback):
+    """Keep eval-env observation normalisation stats in sync with training env."""
 
-    n_envs = 1  # TD3 is off-policy, typically uses single env
+    def __init__(self, train_env: VecNormalize, eval_env: VecNormalize):
+        super().__init__(verbose=0)
+        self._train_env = train_env
+        self._eval_env  = eval_env
+
+    def _on_step(self) -> bool:
+        self._eval_env.obs_rms = self._train_env.obs_rms
+        return True
+
+
+if __name__ == '__main__':
+    # ── Config ────────────────────────────────────────────────────────────
+    # Off-policy: single env is sufficient (replay buffer handles diversity)
     total_timesteps = 500_000
     log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'results', 'TD3')
     os.makedirs(log_dir, exist_ok=True)
 
-    # Environment (TD3 works best with single env)
-    env = make_vec_env(make_env, n_envs=n_envs, seed=42)
+    # ── Training env ──────────────────────────────────────────────────────
+    env = make_vec_env(make_env, n_envs=1, seed=42)
     env = VecNormalize(env, norm_obs=True, norm_reward=False)
 
-    # Eval env
+    # ── Eval env — must NOT update normalisation stats during evaluation ──
     eval_env = make_vec_env(make_env, n_envs=1, seed=123)
-    eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False)
+    eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, training=False)
 
     eval_callback = EvalCallback(
         eval_env,
         best_model_save_path=log_dir,
         log_path=log_dir,
-        eval_freq=10000,
+        eval_freq=10_000,
         deterministic=True,
         render=False,
     )
+    sync_callback = SyncNormCallback(env, eval_env)
 
-    # Action noise for exploration
-    n_actions = env.action_space.shape[-1]
+    # ── Gaussian action noise for exploration ─────────────────────────────
+    n_actions    = env.action_space.shape[-1]
     action_noise = NormalActionNoise(
         mean=np.zeros(n_actions),
-        sigma=0.1 * np.ones(n_actions)
+        sigma=0.1 * np.ones(n_actions),
     )
 
-    # TD3
+    # ── Model ─────────────────────────────────────────────────────────────
     model = TD3(
         policy='MlpPolicy',
         env=env,
@@ -73,10 +91,15 @@ if __name__ == '__main__':
         tensorboard_log=log_dir,
     )
 
-    model.learn(total_timesteps=total_timesteps, callback=eval_callback, log_interval=1, progress_bar=True)
+    model.learn(
+        total_timesteps=total_timesteps,
+        callback=[sync_callback, eval_callback],
+        log_interval=1,
+        progress_bar=True,
+    )
     model.save(f'{log_dir}/final_model')
     env.save(f'{log_dir}/vecnormalize.pkl')
     env.close()
     eval_env.close()
-    
+
     print(f"Training complete. Model saved to {log_dir}/final_model")

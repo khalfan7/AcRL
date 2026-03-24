@@ -145,9 +145,13 @@ class HVACControlEnv(gym.Env):
 
 # Register the environment with Gymnasium — guarded so repeated imports
 # (or imports from different scripts) don't raise a duplicate-id error.
-if "HVACControl-v0" not in gym.envs.registration.registry:
+# Using try/except is more robust across Gymnasium versions than checking
+# the registry dict directly.
+try:
     gym.register(
         id="HVACControl-v0",
         entry_point="hvac_environment:HVACControlEnv",
-        max_episode_steps=288,  # 24 hours at 5 min intervals
+        max_episode_steps=288,  # 24 hours at 5-min control intervals
     )
+except Exception:
+    pass  # already registered by a previous import

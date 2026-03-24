@@ -1,17 +1,18 @@
 """
-Train A2C agent for HVAC control using StableBaselines3
+Train A2C agent for HVAC control using StableBaselines3.
 
-A2C (Advantage Actor-Critic) is an on-policy algorithm that:
-- Uses multiple parallel environments for stable training
-- Is synchronous (deterministic) unlike A3C
-- Best run on CPU with SubprocVecEnv
+A2C (Advantage Actor-Critic) is a synchronous on-policy algorithm:
+  - Multiple parallel envs produce diverse rollouts per update step.
+  - Synchronous updates (unlike async A3C) ensure deterministic training.
+  - SubprocVecEnv + CPU is the typical optimal setup for A2C.
+  - Rewards are normalised to stabilise the critic's value target.
 """
 
 import os
 from stable_baselines3 import A2C
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import SubprocVecEnv, VecNormalize
-from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.callbacks import EvalCallback, BaseCallback
 from hvac_environment import HVACControlEnv
 
 
@@ -19,32 +20,46 @@ def make_env():
     return HVACControlEnv()
 
 
-if __name__ == '__main__':
-    # Config
-    n_envs = 8  # A2C benefits from multiple parallel envs
-    total_timesteps = 500_000
+class SyncNormCallback(BaseCallback):
+    """Keep eval-env normalisation stats in sync with training env."""
 
+    def __init__(self, train_env: VecNormalize, eval_env: VecNormalize):
+        super().__init__(verbose=0)
+        self._train_env = train_env
+        self._eval_env  = eval_env
+
+    def _on_step(self) -> bool:
+        self._eval_env.obs_rms = self._train_env.obs_rms
+        self._eval_env.ret_rms = self._train_env.ret_rms
+        return True
+
+
+if __name__ == '__main__':
+    # ── Config ────────────────────────────────────────────────────────────
+    n_envs          = 8  # A2C benefits from many parallel workers
+    total_timesteps = 500_000
     log_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'results', 'A2C')
     os.makedirs(log_dir, exist_ok=True)
 
-    # Vectorized envs (A2C runs better on CPU with SubprocVecEnv)
+    # ── Training envs (SubprocVecEnv → true parallelism on CPU) ──────────
     env = make_vec_env(make_env, n_envs=n_envs, vec_env_cls=SubprocVecEnv, seed=42)
     env = VecNormalize(env, norm_obs=True, norm_reward=True)
 
-    # Eval env
+    # ── Eval env — must NOT update normalisation stats during evaluation ──
     eval_env = make_vec_env(make_env, n_envs=1, seed=123)
-    eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=True)
+    eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, training=False)
 
     eval_callback = EvalCallback(
         eval_env,
         best_model_save_path=log_dir,
         log_path=log_dir,
-        eval_freq=10000,
+        eval_freq=10_000 // n_envs,   # per-env steps → global steps
         deterministic=True,
         render=False,
     )
+    sync_callback = SyncNormCallback(env, eval_env)
 
-    # A2C
+    # ── Model ─────────────────────────────────────────────────────────────
     model = A2C(
         policy='MlpPolicy',
         env=env,
@@ -63,10 +78,15 @@ if __name__ == '__main__':
         tensorboard_log=log_dir,
     )
 
-    model.learn(total_timesteps=total_timesteps, callback=eval_callback, log_interval=1, progress_bar=True)
+    model.learn(
+        total_timesteps=total_timesteps,
+        callback=[sync_callback, eval_callback],
+        log_interval=1,
+        progress_bar=True,
+    )
     model.save(f'{log_dir}/final_model')
     env.save(f'{log_dir}/vecnormalize.pkl')
     env.close()
     eval_env.close()
-    
+
     print(f"Training complete. Model saved to {log_dir}/final_model")

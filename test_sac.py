@@ -174,7 +174,7 @@ ax2.text(24.15, -max_power, f"−{max_power:.0f}", va="center", fontsize=7, colo
 ax2.set_ylabel("HVAC Power (W)\n[+ cooling  /  − heating]", fontsize=10)
 ax2.set_xlabel("Hour of Day", fontsize=11)
 ax2.set_xlim(0, 24)
-ax2.set_ylim(-800, 800)
+ax2.set_ylim(-max_power * 1.05, max_power * 1.05)
 ax2.set_xticks(range(0, 25, 2))
 ax2.legend(loc="upper right", fontsize=9)
 ax2.grid(alpha=0.3)

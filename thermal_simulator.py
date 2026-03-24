@@ -1,8 +1,23 @@
 import numpy as np
+from numpy.random import Generator
 from typing import Optional, Tuple
 
 
 class ThermalZoneSimulator:
+    """
+    Lumped-capacitance (RC) thermal model for a single HVAC zone.
+
+    Physics (Euler integration, forward step):
+        dT_in/dt = (1/C) * [ U*(T_out - T_in) - Q_hvac ]
+
+    where:
+        C  = thermal_capacitance  [J/°C]
+        U  = heat_transfer_coeff  [W/°C]
+        Q_hvac = action * max_hvac_power  [W]
+            +Q_hvac → removes heat (cooling)
+            -Q_hvac → adds heat   (heating)
+    """
+
     def __init__(
         self,
         thermal_capacitance: float = 300000,
@@ -31,15 +46,19 @@ class ThermalZoneSimulator:
         self.outdoor_temp_array: np.ndarray = np.array([])
         self.current_step: int = 0
         self.hvac_power: float = 0.0
+        self._rng: Generator = np.random.default_rng()
 
     def reset(self, initial_indoor_temp: Optional[float] = None, seed: Optional[int] = None) -> float:
-        if seed is not None:
-            np.random.seed(seed)
+        # Re-create RNG with new seed so each episode is reproducible when seed is given,
+        # while staying statistically independent across episodes when seed is None.
+        self._rng = np.random.default_rng(seed)
         self.current_step = 0
         self.hvac_power = 0.0
         self._generate_outdoor_temp_profile()
         if initial_indoor_temp is None:
-            self.indoor_temp = np.random.uniform(self.initial_temp_range[0], self.initial_temp_range[1])
+            self.indoor_temp = float(
+                self._rng.uniform(self.initial_temp_range[0], self.initial_temp_range[1])
+            )
         else:
             self.indoor_temp = initial_indoor_temp
         return self.indoor_temp

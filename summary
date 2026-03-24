@@ -1,0 +1,26 @@
+── a2c Performance ──────────────────────────────
+  MAE  from setpoint : 0.019 °C
+  RMSE from setpoint : 0.106 °C
+  Comfort violations : 0.3% of steps outside ±0.5 °C
+  Peak cooling power : 2,000 W  (66.7% of capacity)
+  Peak heating power : 0 W  (0.0% of capacity)
+  Total energy used  : 9,900 Wh  (9.90 kWh)
+─────────────────────────────────────────────────────
+
+── ppo Performance ──────────────────────────────
+  MAE  from setpoint : 0.091 °C
+  RMSE from setpoint : 0.147 °C
+  Comfort violations : 0.7% of steps outside ±0.5 °C
+  Peak cooling power : 3,000 W  (100.0% of capacity)
+  Peak heating power : 959 W  (32.0% of capacity)
+  Total energy used  : 10,184 Wh  (10.18 kWh)
+─────────────────────────────────────────────────────
+
+── sac Performance ──────────────────────────────
+  MAE  from setpoint : 0.011 °C
+  RMSE from setpoint : 0.052 °C
+  Comfort violations : 0.3% of steps outside ±0.5 °C
+  Peak cooling power : 2,915 W  (97.2% of capacity)
+  Peak heating power : 0 W  (0.0% of capacity)
+  Total energy used  : 9,892 Wh  (9.89 kWh)
+─────────────────────────────────────────────────────
