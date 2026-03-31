@@ -1,140 +1,458 @@
 # DRL-Based HVAC Control for a Single-Zone Smart Building
 
-Reinforcement learning agents (PPO, SAC, TD3, A2C) trained to regulate the
-indoor temperature of a lumped-capacitance thermal zone against a sinusoidal
-outdoor temperature profile, balancing **thermal comfort** and **energy efficiency**.
+Deep reinforcement learning agents (PPO, SAC, TD3, A2C) that learn to regulate
+indoor temperature of a physics-based thermal zone using **real EPA hourly
+weather data**, **electricity pricing**, and **domain randomisation** — balancing
+thermal comfort, energy cost, and actuator smoothness.
 
 ---
 
-## Requirements Table
+## End-to-End Pipeline
 
-| Requirement | Implementation |
+The diagram below shows how every component connects, from raw data to a
+trained, evaluated policy.
+
+```
+┌─────────────────────────── DATA INGESTION ───────────────────────────┐
+│                                                                      │
+│  EPA .hNN files                  NY Rate Table                       │
+│  (Syracuse / Albany)             newyork_monthly.txt                  │
+│        │                                │                            │
+│        ▼                                ▼                            │
+│  ┌──────────────┐              ┌──────────────────┐                  │
+│  │ weather.py   │              │   pricing.py     │                  │
+│  │ load_hnn_    │              │ load_monthly_    │                  │
+│  │ multi()      │              │ prices()         │                  │
+│  └──────┬───────┘              └────────┬─────────┘                  │
+│         │  DataFrame: T_out,            │  ndarray (12,): ¢/kWh     │
+│         │  GHI, wind, month, doy        │                            │
+└─────────┼───────────────────────────────┼────────────────────────────┘
+          │                               │
+          ▼                               ▼
+┌─────────────────────────── SIMULATOR ────────────────────────────────┐
+│                                                                      │
+│  ThermalZoneSimulator  (envs/simulator.py)                           │
+│  ─────────────────────────────────────────                           │
+│  • Stores full 2-year weather archive                                │
+│  • Pre-builds season index buckets (W / Sp / Su / F)                 │
+│  • On reset():                                                       │
+│      1. Draw C ~ U(200k, 500k),  U ~ U(30, 80)   [domain random.]   │
+│      2. Pick season via round-robin cycle          [stratified]       │
+│      3. Random 24h window within that season       [episode]          │
+│      4. Randomise T_in ±4 °C around setpoint                        │
+│  • On step(action):                                                  │
+│      Euler forward:                                                  │
+│        T_in += (Δt/C)·[U_eff·(T_out−T_in) + α·GHI − Q_hvac]       │
+│      where U_eff = U·(1 + k_w·wind)                                 │
+│                                                                      │
+└──────────────────────────────┬───────────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────── GYMNASIUM ENV ────────────────────────────┐
+│                                                                      │
+│  HVACControlEnv  (envs/environment.py)                               │
+│  ─────────────────────────────────────                               │
+│  • Wraps simulator, adds pricing                                     │
+│  • Builds 12-dim observation   (see Observation Space below)         │
+│  • Computes 3-term reward      (see Reward Function below)           │
+│  • Factories: make_train_env() / make_test_env()                     │
+│                                                                      │
+└──────────────────────────────┬───────────────────────────────────────┘
+                               │
+            ┌──────────────────┴──────────────────┐
+            ▼                                     ▼
+┌─────── TRAINING ────────┐          ┌──────── EVALUATION ─────────┐
+│ training/train_*.py     │          │ evaluation/test_*.py        │
+│                         │          │                             │
+│ 1. VecEnv + VecNorm     │          │ 1. Load best_model.zip      │
+│ 2. SB3 algorithm        │  save    │ 2. Load vecnormalize.pkl    │
+│ 3. 500k steps           │───────►  │ 3. 100 episodes on Albany   │
+│ 4. EvalCallback saves   │  .zip    │    (25/season, stratified)  │
+│    best_model.zip       │  .pkl    │ 4. Per-season stats + CSV   │
+│    vecnormalize.pkl     │          │ 5. Boxplots + season traces │
+└─────────────────────────┘          └─────────────────────────────┘
+```
+
+### Pipeline Steps (what happens when you run the project)
+
+| Step | What runs | What it does |
+|------|-----------|--------------|
+| **0 — Setup** | `pip install ...` | Install Gymnasium, Stable-Baselines3, NumPy, pandas, matplotlib |
+| **1 — Parse weather** | `envs/weather.py` | Reads EPA fixed-width `.hNN` files → DataFrame with `T_out`, `GHI`, `wind_speed`, `month`, `doy`, `hour_of_day`. Two years (h89 + h90) concatenated = ~17,520 rows |
+| **2 — Load pricing** | `envs/pricing.py` | Reads `newyork_monthly.txt` → shape-(12,) array of monthly electricity rates (¢/kWh) |
+| **3 — Build simulator** | `envs/simulator.py` | Wraps the weather DataFrame into a physics engine: RC thermal ODE with solar gain, wind effects, domain randomisation, and stratified seasonal sampling |
+| **4 — Wrap as Gym env** | `envs/environment.py` | Adds observation engineering (12-dim), cost-aware reward, Gymnasium API. Factory functions wire everything together |
+| **5 — Train** | `training/train_*.py` | Vectorised envs + VecNormalize + SB3 algorithm. 500k steps with eval callbacks. Saves `best_model.zip` + `vecnormalize.pkl` |
+| **6 — Evaluate** | `evaluation/test_*.py` | Loads trained model, runs **100 episodes** (25 per season via stratified round-robin) on **Albany** (unseen city). Reports overall + per-season stats, saves CSV, boxplots, and representative 24h traces |
+| **7 — Compare** | `evaluation/plot_convergence.py` | Reads `evaluations.npz` from each algorithm, plots learning curves side-by-side |
+
+---
+
+## Step 1 — Designing the Simulator
+
+The simulator (`envs/simulator.py`) is the most critical component — the RL
+agent's **entire understanding of the world** comes from interacting with it.
+Getting the physics and episode design right determines whether the policy
+transfers to reality.
+
+### 1.1  Governing Equation
+
+First-law lumped-capacitance (RC) ODE with solar gain and wind-modified
+conductance, solved with Euler forward integration at each 5-minute control
+step ($\Delta t = 300$ s):
+
+$$\frac{dT_{in}}{dt} = \frac{1}{C}\bigl[U_{eff}(T_{out} - T_{in}) + \alpha \cdot GHI - Q_{hvac}\bigr]$$
+
+where $U_{eff} = U \cdot (1 + k_w \cdot v_{wind})$.
+
+| Symbol | Parameter | Default / Range | Physical meaning |
+|--------|-----------|-----------------|------------------|
+| $C$ | `thermal_capacitance` | $\sim\mathcal{U}(200\,000,\;500\,000)$ J/°C | Thermal mass of the zone (walls, air, furniture) |
+| $U$ | `heat_transfer_coeff` | $\sim\mathcal{U}(30,\;80)$ W/°C | Envelope conductance (randomised per episode) |
+| $U_{eff}$ | effective conductance | — | Wind-modified: higher wind → more infiltration / convection |
+| $k_w$ | `wind_coeff` | 0.05 s/m | Wind speed amplification factor |
+| $\alpha$ | `solar_gain_coeff` | 0.5 m² | Effective aperture × absorptance |
+| $GHI$ | Global Horizontal Irradiance | from weather (Wh/m²) | Solar heat gain through glazing |
+| $Q_{hvac}$ | `action × max_hvac_power` | ±3 000 W | Controlled input from HVAC |
+| $T_{out}$ | dry-bulb temperature | from weather (°C) | Disturbance signal |
+| $T_{in}$ | `indoor_temp` | randomised ±4 °C | Controlled variable |
+
+**Why these choices?**
+- The RC model is simple enough for fast simulation (~1 μs per step) but
+  captures the dominant thermal dynamics of a single zone.
+- Solar gain and wind effects add realism without requiring a full EnergyPlus
+  co-simulation — the agent must learn that sunny afternoons cause overheating
+  and that windy nights accelerate heat loss.
+- Sign convention: $Q_{hvac} > 0$ = cooling, $Q_{hvac} < 0$ = heating.
+
+**Discretised step** (what the code computes each call to `step()`):
+
+$$T_{in}^{k+1} = T_{in}^{k} + \frac{\Delta t}{C}\bigl[U_{eff}(T_{out}^{k} - T_{in}^{k}) + \alpha \cdot GHI^{k} - Q_{hvac}^{k}\bigr]$$
+
+### 1.2  Real Weather Data
+
+Hourly observations from EPA PRZM `.hNN` fixed-width files, parsed by
+`envs/weather.py`:
+
+| Field | EPA Column | Unit | Use in model |
+|-------|-----------|------|--------------|
+| Dry-bulb temperature | cols 65–69 | °C | $T_{out}$ — drives envelope heat exchange |
+| Global Horizontal Irradiance | cols 30–34 | Wh/m² | $GHI$ — solar gain through windows |
+| Wind speed (10 m) | cols 96–100 | m/s | Modifies $U_{eff}$ — wind increases heat loss |
+
+Each archive spans **two full years** (1989–1990), giving ~17,520 hourly
+rows per station. The parser concatenates both `.h89` and `.h90` into a single
+DataFrame that the simulator indexes by row number.
+
+### 1.3  Domain Randomisation
+
+To make the policy robust to building-parameter uncertainty the simulator
+draws fresh values of $C$ and $U$ at the start of **every episode**:
+
+$$C \sim \mathcal{U}(C_{min},\;C_{max}) \qquad U \sim \mathcal{U}(U_{min},\;U_{max})$$
+
+The agent observes normalised ratios $C/C_{nominal}$ and $U/U_{nominal}$ in
+its state vector — it can *see* the current building characteristics and
+adapt. This is the sim-to-real transfer mechanism: if the real building's C
+and U fall within the trained range, the policy should generalise.
+
+### 1.4  Stratified Seasonal Sampling
+
+Weather is seasonal — temperature ranges in January (−20 °C) are nothing
+like July (+35 °C). Purely random episode sampling would produce a roughly
+uniform distribution across months, but clustering can still leave seasonal
+gaps in a finite training budget.
+
+**Solution — round-robin season cycling.**  At initialisation the simulator
+pre-computes four index buckets:
+
+| Quartile | Months | Typical bucket size |
+|----------|--------|---------------------|
+| **Winter** (Q0) | Dec, Jan, Feb | ~4,300 valid start indices |
+| **Spring** (Q1) | Mar, Apr, May | ~4,400 |
+| **Summer** (Q2) | Jun, Jul, Aug | ~4,400 |
+| **Fall** (Q3) | Sep, Oct, Nov | ~4,400 |
+
+On each `reset()` the simulator:
+
+1. Selects the **next season** in a deterministic cycle: W → Sp → Su → F → W → …
+2. Picks a **random starting hour** within that season's bucket.
+3. Extracts the 24-hour window starting there.
+
+This guarantees the agent sees all four seasons **equally** over any block of
+four consecutive episodes, while still randomising the specific day within
+each season. The result: the agent cannot overfit to summer-dominated data or
+miss rare winter extremes.
+
+### 1.5  Episode Lifecycle (what `reset` + `step` do)
+
+```
+reset(seed)
+  │
+  ├─ 1. Create episode-local RNG (default_rng(seed))
+  ├─ 2. Draw C, U from uniform bounds → store C_ratio, U_ratio
+  ├─ 3. Season cycle: pick season quartile (round-robin)
+  ├─ 4. Random start within season bucket → slice 24h from archive
+  ├─ 5. Randomise T_in ∈ [setpoint ± 4 °C]
+  └─ return T_in
+          │
+          ▼
+step(action)   ← called 288 times per episode (24h ÷ 5min)
+  │
+  ├─ 1. Clip action to [-1, 1]
+  ├─ 2. Q_hvac = action × 3000 W
+  ├─ 3. Look up weather for current step (zero-order hold within hour)
+  ├─ 4. U_eff = U × (1 + k_w × wind_speed)
+  ├─ 5. Q_solar = α × GHI
+  ├─ 6. Euler step: T_in += (Δt/C) × [U_eff×(T_out−T_in) + Q_solar − Q_hvac]
+  ├─ 7. Increment step counter; check if done (step ≥ 288)
+  └─ return (T_in, weather_dict, done)
+```
+
+---
+
+## Step 2 — Designing the RL Environment
+
+The Gymnasium wrapper (`envs/environment.py`) sits between the simulator and
+the RL algorithm.  It has three jobs: **build the observation**, **compute the
+reward**, and **satisfy the Gymnasium API**.
+
+### 2.1  Observation Space (12-dimensional)
+
+The observation is a dense `float32` vector assembled from the simulator state
+plus pricing data.  Every feature is either normalised to a bounded range or
+already unitless:
+
+| Idx | Feature | Source | Range | Why included |
+|-----|---------|--------|-------|--------------|
+| 0 | `temp_error` | $T_{in} - T_{set}$ | \[−50, 50\] °C | Primary error signal |
+| 1 | `outdoor_norm` | $(T_{out} - 20) / 20$ | \[−2, 2\] | Current heat load |
+| 2 | `sin_hour` | $\sin(2\pi h / 24)$ | \[−1, 1\] | Cyclic time-of-day |
+| 3 | `cos_hour` | $\cos(2\pi h / 24)$ | \[−1, 1\] | (avoids discontinuity at midnight) |
+| 4 | `sin_year` | $\sin(2\pi \cdot doy / 365)$ | \[−1, 1\] | Cyclic time-of-year |
+| 5 | `cos_year` | $\cos(2\pi \cdot doy / 365)$ | \[−1, 1\] | (season awareness) |
+| 6 | `price_norm` | $p_{month} / p_{max}$ | \[0, 1\] | Electricity cost signal |
+| 7 | `solar_norm` | $GHI / 1200$ | \[0, 1\] | Anticipate solar gain |
+| 8 | `wind_norm` | $v_{wind} / 20$ | \[0, 1\] | Anticipate wind-driven loss |
+| 9 | `C_ratio` | $C / C_{nominal}$ | \[≈0.57, ≈1.43\] | Building thermal mass |
+| 10 | `U_ratio` | $U / U_{nominal}$ | \[≈0.55, ≈1.45\] | Building conductance |
+| 11 | `prev_action` | last HVAC command | \[−1, 1\] | Enables slew penalty |
+
+**Design rationale:**
+
+- **Cyclic time encoding** (sin/cos pairs) eliminates the 23:59 → 00:00
+  discontinuity that would confuse a neural network if raw hours were used.
+- **Price in the observation** lets the agent learn price-responsive control —
+  it can reduce power during expensive months and compensate during cheap ones.
+- **C_ratio / U_ratio** inform the agent about the building it is currently
+  controlling (varies per episode via domain randomisation).
+- **prev_action** gives the agent memory of its last command so it can
+  minimise the slew penalty.
+
+### 2.2  Action Space
+
+A single continuous value in $[-1, 1]$ (shape `(1,)`), mapped linearly to
+HVAC power:
+
+$$Q_{hvac} = a_t \times 3\,000 \;\text{W}$$
+
+- $a_t = +1.0$ → full cooling (3 kW removed)
+- $a_t = 0.0$ → HVAC off
+- $a_t = -1.0$ → full heating (3 kW added)
+
+### 2.3  Reward Function (cost-aware, 3-term)
+
+The reward is the **only learning signal** seen by the RL algorithm.  It
+is computed every step inside `HVACControlEnv._compute_reward()`:
+
+$$\boxed{R_t = -\bigl(w_c \cdot \underbrace{|T_{in} - T_{set}|}_{\text{comfort}} + w_e \cdot \underbrace{|a_t| \cdot \tfrac{p_t}{p_{max}}}_{\text{energy cost}} + w_s \cdot \underbrace{|a_t - a_{t-1}|}_{\text{slew}}\bigr)}$$
+
+| Term | Weight | Range | Purpose |
+|------|--------|-------|---------|
+| **Comfort penalty** | $w_c = 1.0$ | unbounded | Every °C of deviation is penalised |
+| **Energy cost** | $w_e = 0.1$ | $[0, 1]$ | Price-scaled: $\|a_t\|$ × normalised electricity price. Higher price month → higher penalty for same power |
+| **Action slew** | $w_s = 0.05$ | $[0, 2]$ | Penalises rapid actuator swings → smoother control |
+
+**How pricing enters the reward:**  The energy term multiplies the action
+magnitude by $p_t / p_{max}$ where $p_t$ is the current month's NY
+residential electricity rate.  The agent receives $p_t / p_{max}$ as
+observation feature `price_norm` (index 6), so it *knows* the current price
+and can decide to trade a small comfort loss for significant energy savings
+during expensive months.
+
+**Weight tuning intuition:**
+
+| Configuration | Learned behaviour |
 |---|---|
-| **Thermal Model** | Lumped-capacitance (RC) model — `thermal_simulator.py` |
-| **RL Environment** | Gymnasium-compatible `HVACControlEnv` — `hvac_environment.py` |
-| **State Space** | 4-dim: `[temp_error, outdoor_norm, sin_time, cos_time]` |
-| **Action Space** | Continuous ∈ \[-1, 1\] → scales HVAC power ±3 000 W |
-| **Reward Function** | `R = −|e_T| − λ·|a|`  (comfort + energy penalty) |
-| **Algorithms** | PPO, SAC, TD3, A2C (all support continuous actions) |
-| **Weather Profile** | Sinusoidal diurnal cycle, peak at 15:00 |
+| $w_e=0,\; w_s=0$ (comfort only) | Bang-bang: full power whenever any error exists |
+| $w_e=0.1,\; w_s=0.05$ (default) | Proportional, smooth, price-responsive |
+| $w_e \gg 1$ (energy dominant) | Near-zero action; comfort sacrificed |
 
----
+**Training vs. testing:**
 
-## Thermal Model — `ThermalZoneSimulator`
+| Context | Uses reward? | What is reported |
+|---------|-------------|------------------|
+| **Training** | Yes — sole learning signal. Maximises $G_t = \sum \gamma^k R_{t+k}$ | Return (reward sum) |
+| **Evaluation** | No — reward is discarded | Physical metrics: MAE, RMSE, violations, energy (Wh), peak power |
 
-`thermal_simulator.py` is the **physics engine** for the entire project.  Every
-RL algorithm interacts with the real world only through this class — it is the
-environment's ground truth.
+The evaluation metrics map directly to the reward terms:
 
-### Governing Equation
-
-First-law lumped-capacitance (RC) ODE, solved with Euler forward integration
-at each 5-minute control step ($\Delta t = 300$ s):
-
-$$\frac{dT_{in}}{dt} = \frac{1}{C}\bigl[U(T_{out} - T_{in}) - Q_{hvac}\bigr]$$
-
-| Symbol | Parameter | Default | Physical meaning |
-|--------|-----------|---------|------------------|
-| $C$ | `thermal_capacitance` | 300 000 J/°C | Thermal mass of the zone (walls, air, furniture) |
-| $U$ | `heat_transfer_coeff` | 50 W/°C | Heat leakage through envelope |
-| $Q_{hvac}$ | `action × max_hvac_power` | ±3 000 W | Net power delivered by HVAC unit |
-| $T_{out}$ | outdoor temp array | sinusoidal | Disturbance driving heat gain/loss |
-| $T_{in}$ | `indoor_temp` | randomised | Controlled variable |
-
-**Sign convention** — $Q_{hvac} > 0$ removes heat (cooling); $Q_{hvac} < 0$ adds heat (heating).
-
-**Discretised step** (what the code actually computes):
-
-$$T_{in}^{k+1} = T_{in}^{k} + \frac{\Delta t}{C}\bigl[U(T_{out}^{k} - T_{in}^{k}) - Q_{hvac}^{k}\bigr]$$
-
-### Outdoor Temperature Profile
-
-Configured via `outdoor_temp_profile` (default `'sinusoidal'`):
-
-| Mode | Behaviour |
-|------|-----------|
-| `'sinusoidal'` | $T_{out}(t) = T_{base} + A\sin\bigl(\tfrac{2\pi t}{24h} + \phi\bigr)$, peak at **15:00** |
-| `'constant'` | Fixed at $T_{base}$ — good for unit tests |
-| `'step'` | Steps up by $A$ at the episode midpoint — stress test |
-
-### Key Simulator Internals
-
-| Attribute / Method | Role |
+| Physical metric | Corresponds to |
 |---|---|
-| `max_steps = duration / dt` | Total control steps per episode (288 for 24 h @ 5 min) |
-| `reset(seed)` | Creates a new `np.random.default_rng(seed)` (episode-local, no global state mutation); randomises $T_{in,0}\in[18,28]$ °C; regenerates outdoor profile |
-| `step(action)` | Clips action to $[-1,1]$; sets $Q_{hvac}$; runs one Euler step; increments `current_step`; returns `(T_{in}, T_{out}, done)` |
-| `get_state()` | Returns a dict `{indoor_temp, outdoor_temp, setpoint_temp, temp_error, hvac_power, current_step, elapsed_hours}` — used as `info` by the Gymnasium env |
-| `elapsed_hours` (property) | `current_step × dt / 3600` — convenience accessor |
+| MAE / RMSE (°C) | Comfort term |
+| Total energy (Wh) | Energy cost term |
+| Comfort violations (% steps outside ±0.5 °C) | Comfort term |
+| Peak cooling / heating (W) | Energy + slew terms |
 
 ---
 
-## Reward Function
+## Step 3 — Training
 
-Defined in `HVACControlEnv.step()` — the **only learning signal** seen by
-the RL algorithm during training.
+### 3.1  Algorithm Selection
 
-$$\boxed{R_t = -\underbrace{|T_{in} - T_{set}|}_{\text{comfort term}} - \lambda\underbrace{|a_t|}_{\text{energy term}}}$$
+| Algorithm | Type | # Envs | VecEnv | Reward norm | Key trait |
+|-----------|------|--------|--------|-------------|-----------|
+| **PPO** | On-policy | 8 | SubprocVecEnv | ✓ | Robust default; clipped surrogate objective |
+| **A2C** | On-policy | 8 | SubprocVecEnv | ✓ | Synchronous A3C; fast on CPU |
+| **SAC** | Off-policy | 1 | DummyVecEnv | ✗ | Entropy-regularised; auto entropy tuning |
+| **TD3** | Off-policy | 1 | DummyVecEnv | ✗ | Deterministic policy; Gaussian noise σ = 0.1 |
 
-### Term-by-term breakdown
+**On-policy (PPO / A2C):** use 8 parallel environments for sample throughput
+and enable reward normalisation so the critic value targets stay well-scaled.
 
-| Term | Symbol | Default weight | Purpose |
-|------|--------|----------------|---------|
-| Comfort penalty | $-\|T_{in}-T_{set}\|$ | 1.0 | Penalises every °C of deviation from setpoint; the primary objective |
-| Energy penalty | $-\lambda\|a_t\|$ | $\lambda=0.1$ | Penalises HVAC power magnitude; discourages bang-bang control |
+**Off-policy (SAC / TD3):** use 1 environment (replay buffer provides
+diversity); reward normalisation disabled because the buffer already
+stabilises target statistics.
 
-### Role in training vs. testing
+### 3.2  Training Script Pattern
 
-**Training** — the reward is the *sole* feedback signal.  The algorithm
-(PPO/SAC/TD3/A2C) maximises discounted cumulative return
-$G_t = \sum_{k=0}^{\infty}\gamma^k R_{t+k}$ by adjusting its policy.
-With $\lambda=0$ the agent maximises comfort at any energy cost.  With
-$\lambda=0.1$ it learns smoother, proportional responses instead of
-saturating the actuator at ±3 000 W whenever there is even a small error.
+Every `training/train_*.py` follows the same sequence.  The shared
+`SyncNormCallback` lives in `training/callbacks.py` so that each script only
+contains its algorithm-specific configuration:
 
-**Testing** — `test_*.py` receives the reward from `env.step()` but
-**never reads it**.  Evaluation instead uses physical metrics that directly
-measure the two objectives the reward was designed to proxy:
+```python
+from envs import make_train_env                # Syracuse weather + NY 2025 pricing
+from training.callbacks import SyncNormCallback # shared callback
 
-| Physical metric | What it measures | Corresponds to |
-|---|---|---|
-| MAE / RMSE (°C) | Temperature tracking accuracy | Comfort term |
-| Total energy (Wh) | Electricity consumed | Energy term |
-| Comfort violations (%) | Steps outside ±0.5 °C band | Comfort term |
-| Peak cooling / heating (W) | Actuator saturation | Energy term |
+# ① Vectorised training env with observation + reward normalisation
+env = make_vec_env(make_train_env, n_envs=N, seed=42)
+env = VecNormalize(env, norm_obs=True, norm_reward=<True/False>)
 
-### Why two terms?
+# ② Separate eval env (training=False prevents running-stat drift)
+eval_env = VecNormalize(make_vec_env(...), training=False)
 
-| Reward shape | Learnt behaviour |
-|---|---|
-| $\lambda=0$ (comfort only) | Bang-bang: full cooling/heating whenever any error exists |
-| $\lambda=0.1$ (default) | Proportional: power scales with error magnitude |
-| $\lambda\gg 1$ (energy dominant) | Near-zero action; comfort sacrificed |
+# ③ Callbacks
+#    SyncNormCallback — copies obs running stats from train env to eval env
+#                       (also syncs ret_rms when reward normalisation is on)
+#    EvalCallback     — evaluates every 10k steps, saves best_model.zip
+callbacks = [SyncNormCallback(env, eval_env), EvalCallback(eval_env, ...)]
 
-$\lambda=0.1$ keeps the energy penalty as a **regulariser** — it shapes the
-action distribution without overriding the thermal comfort objective.  In a
-real building this trades off electricity cost against occupant satisfaction.
+# ④ Train
+model = PPO("MlpPolicy", env, ...)
+model.learn(total_timesteps=500_000, callback=callbacks)
+
+# ⑤ Save artifacts
+model.save("results/PPO/final_model")
+env.save("results/PPO/vecnormalize.pkl")       # needed at test time
+```
+
+Similarly, the test scripts are thin wrappers that call the shared engine in
+`evaluation/generalization.py`:
+
+```python
+from stable_baselines3 import PPO
+from evaluation.generalization import run_generalization_test
+
+run_generalization_test(PPO, "PPO")   # loads model, runs 100 episodes, saves outputs
+```
+
+### 3.3  Training Budget
+
+- **500,000 environment steps** at 288 steps/episode ≈ **1,736 episodes**
+- With stratified sampling (4 seasons), that's ~434 episodes per season
+- Each episode sees a fresh (C, U) draw → the agent trains across ~1,736
+  different "buildings" in ~1,736 different weather days
 
 ---
 
-## Observation Space  (4-dimensional)
+## Step 4 — Evaluation
 
-| Index | Feature | Range | Description |
-|-------|---------|-------|-------------|
-| 0 | `temp_error` | \[−50, 50\] °C | $T_{in} - T_{set}$ |
-| 1 | `outdoor_norm` | \[−1, 1\] | $(T_{out} - T_{base}) / A$ |
-| 2 | `sin_time` | \[−1, 1\] | $\sin(2\pi \cdot h / 24)$ |
-| 3 | `cos_time` | \[−1, 1\] | $\cos(2\pi \cdot h / 24)$ |
+### 4.1  Generalisation Test on Albany
 
-The cyclic time encoding lets the agent infer the time of day without clipping
-artefacts:
+The test scripts load the saved policy and VecNormalize stats, then run **100
+deterministic 24-hour episodes** on **Albany NY** — a city the agent has
+**never seen during training**.  The stratified round-robin sampling ensures
+exactly **25 episodes per season** (Winter → Spring → Summer → Fall cycling),
+so performance is measured uniformly across the full annual weather range.
 
-| Time | sin | cos | Meaning |
-|------|-----|-----|---------|
-| 00:00 | 0 | +1 | midnight |
-| 06:00 | +1 | 0 | dawn |
-| 12:00 | 0 | −1 | noon |
-| 18:00 | −1 | 0 | dusk |
+```bash
+python evaluation/test_ppo.py
+```
+
+### 4.2  Reported Metrics
+
+Each episode produces per-episode statistics.  The console prints overall and
+per-season summaries (mean ± std):
+
+| Metric | Unit | What it tells you |
+|--------|------|-------------------|
+| MAE | °C | Average temperature tracking error |
+| RMSE | °C | Penalises large deviations more than MAE |
+| Comfort violations | % | Fraction of steps where $\|T_{in}-T_{set}\| > 0.5$ °C |
+| Energy | kWh/day | Total electricity consumed per 24 h episode |
+| Reward | — | Sum of step rewards (for algorithm comparison) |
+
+### 4.3  Outputs
+
+Each test script writes three artifacts to `results/<ALGO>/`:
+
+| File | Description |
+|------|-------------|
+| `generalization_stats_<algo>.csv` | Per-episode metrics (100 rows) for cross-algorithm comparison |
+| `generalization_boxplots_<algo>.png` | 2×2 boxplots of MAE, RMSE, violations%, and energy by season |
+| `seasonal_profiles_<algo>.png` | 4×2 grid: representative 24h trace per season (temp + HVAC power), selected as the episode closest to the season's median MAE |
+
+The **boxplot figure** is the primary generalization report — it shows how
+performance varies by season and how tight the distribution is.  Wide boxes
+or outliers indicate weather conditions the agent struggles with.
+
+The **seasonal profiles** figure gives qualitative insight — you can see how
+the agent responds to winter cold snaps vs summer heat waves, and whether it
+uses heating, cooling, or both appropriately.
+
+### 4.4  Convergence Comparison
+
+```bash
+python evaluation/plot_convergence.py
+```
+
+Reads `evaluations.npz` from each algorithm directory and plots mean eval
+reward ± std over training, saved to `results/training_convergence.png`.
+
+---
+
+## Data
+
+### Weather — EPA PRZM .hNN Format
+
+| Split | Station | WBAN | Files | Purpose |
+|-------|---------|------|-------|---------|
+| **Train** | Syracuse NY | 14771 | `Data/Data_Syracuse_train/w14771.h89`, `.h90` | 2-year training archive |
+| **Test** | Albany NY | 14735 | `Data/Data_Albany_test/w14735.h89`, `.h90` | Generalisation benchmark |
+
+Both stations are in upstate New York (~250 km apart), sharing a climate zone
+but with different micro-climates — making Albany a meaningful out-of-
+distribution test.
+
+### Electricity Pricing
+
+`Data/Pricing/newyork_monthly.txt` — New York State 2025 residential rates
+(~25–27 ¢/kWh). The weather data spans 1989–1990, but real pricing for those
+years is unavailable, so 2025 rates are used as a modern proxy. Used in two
+places:
+
+1. **Observation** (index 6): agent sees current normalised price
+2. **Reward**: energy penalty is scaled by normalised price
 
 ---
 
@@ -142,201 +460,82 @@ artefacts:
 
 ```
 AcRL/
-├── thermal_simulator.py     # Physics engine (RC thermal model)
-├── hvac_environment.py      # Gymnasium environment wrapper
-├── train_ppo.py             # PPO training script
-├── train_sac.py             # SAC training script
-├── train_td3.py             # TD3 training script
-├── train_a2c.py             # A2C training script
-├── test_ppo.py              # PPO evaluation + daily profile plot
-├── test_sac.py              # SAC evaluation + daily profile plot
-├── test_td3.py              # TD3 evaluation + daily profile plot
-├── test_a2c.py              # A2C evaluation + daily profile plot
-├── plot_convergence.py      # Side-by-side convergence comparison
-├── results/
-│   ├── PPO/                 # best_model.zip, vecnormalize.pkl, evaluations.npz
-│   ├── SAC/
-│   ├── TD3/
-│   └── A2C/
-└── readme.md
+├── readme.md
+│
+├── envs/                              # Environment package
+│   ├── __init__.py                    #   exports HVACControlEnv, make_train_env, make_test_env
+│   ├── environment.py                 #   Gymnasium env: 12-dim obs, cost-aware reward
+│   ├── simulator.py                   #   RC thermal model, domain randomisation, stratified sampling
+│   ├── weather.py                     #   EPA .hNN hourly weather parser
+│   └── pricing.py                     #   Monthly electricity price loader
+│
+├── training/                          # Training scripts
+│   ├── __init__.py
+│   ├── callbacks.py                   #   SyncNormCallback (shared by all trainers)
+│   ├── train_ppo.py
+│   ├── train_sac.py
+│   ├── train_td3.py
+│   └── train_a2c.py
+│
+├── evaluation/                        # Testing & visualisation
+│   ├── __init__.py
+│   ├── generalization.py              #   100-episode evaluation engine (shared by all testers)
+│   ├── test_ppo.py
+│   ├── test_sac.py
+│   ├── test_td3.py
+│   ├── test_a2c.py
+│   └── plot_convergence.py
+│
+├── Data/
+│   ├── Data_Syracuse_train/           # EPA .hNN files (1989–1990)
+│   ├── Data_Albany_test/              # EPA .hNN files (1989–1990)
+│   └── Pricing/
+│       └── newyork_monthly.txt        # NY residential electricity rates
+│
+└── results/                           # Generated during training/evaluation
+    ├── PPO/                           #   best_model.zip, vecnormalize.pkl, evaluations.npz,
+    │                                  #   generalization_stats_ppo.csv,
+    │                                  #   generalization_boxplots_ppo.png,
+    │                                  #   seasonal_profiles_ppo.png
+    ├── SAC/
+    ├── TD3/
+    └── A2C/
 ```
 
 ---
 
-## Prerequisites
+## Setup & Usage
+
+### Prerequisites
 
 ```
 Python >= 3.9
 gymnasium
 stable-baselines3[extra]   # includes tensorboard, matplotlib
 numpy
+pandas
 matplotlib
 ```
 
-Install with:
-
 ```bash
-pip install gymnasium "stable-baselines3[extra]" numpy matplotlib
+pip install gymnasium "stable-baselines3[extra]" numpy pandas matplotlib
 ```
 
----
-
-## Usage
-
-### 1 — Train an agent
+### Quick Start
 
 ```bash
-python train_ppo.py    # or train_sac.py / train_td3.py / train_a2c.py
-```
+# 1. Train (pick any algorithm)
+python training/train_ppo.py
 
-Each script trains for 500 000 environment steps, saves the best checkpoint
-(by mean eval reward) to `results/<ALGO>/best_model.zip`, and exports
-`vecnormalize.pkl` for inference-time observation normalisation.
+# 2. Evaluate on Albany
+python evaluation/test_ppo.py
 
-### 2 — Evaluate (24-hour episode plot)
+# 3. Compare all algorithms
+python evaluation/plot_convergence.py
 
-```bash
-python test_ppo.py    # loads best_model or final_model automatically
-```
-
-Prints MAE, RMSE, comfort violations, peak power, and total energy, then saves
-`results/<ALGO>/daily_episode_profile_<algo>.png`.
-
-### 3 — Compare convergence across algorithms
-
-```bash
-python plot_convergence.py
-```
-
-Requires at least one `results/<ALGO>/evaluations.npz` to be present.
-Saves `results/training_convergence.png`.
-
-### 4 — TensorBoard
-
-```bash
+# 4. TensorBoard (optional)
 tensorboard --logdir results/
 ```
-
----
-
-## Algorithm Notes
-
-| Algorithm | Type | Envs | Reward norm | Notes |
-|-----------|------|------|-------------|-------|
-| **PPO** | On-policy | 8 × SubprocVecEnv | ✓ | Robust, good first choice |
-| **A2C** | On-policy | 8 × SubprocVecEnv | ✓ | Fast CPU training; lower sample efficiency than PPO |
-| **SAC** | Off-policy | 1 × DummyVecEnv | ✗ | Entropy-regularised; automatic entropy tuning |
-| **TD3** | Off-policy | 1 × DummyVecEnv | ✗ | Deterministic; Gaussian exploration noise σ = 0.1 |
-
-**On-policy (PPO / A2C):** reward normalisation is enabled so the critic value
-targets stay well-scaled.  An in-training `SyncNormCallback` keeps the eval
-env's observation running stats aligned with the training env.
-
-**Off-policy (SAC / TD3):** reward normalisation is disabled; the replay buffer
-already stabilises learning.  Observation normalisation is still used.
-
----
-
-## Code Reference
-
-### `thermal_simulator.py` — `ThermalZoneSimulator`
-
-Self-contained physics engine.  The Gymnasium environment owns one instance
-and delegates all physical state updates to it.
-
-```
-HVACControlEnv
-    └── ThermalZoneSimulator   ← physics
-            ├── indoor_temp        (controlled variable)
-            ├── outdoor_temp_array (disturbance profile)
-            ├── hvac_power         (action × max_hvac_power)
-            └── current_step       (episode clock)
-```
-
-| Method | Description |
-|--------|-------------|
-| `__init__()` | Stores all RC parameters; pre-computes `max_steps = simulation_duration / control_timestep` |
-| `reset(seed)` | Creates episode-local `np.random.default_rng(seed)` (no global seed mutation); draws $T_{in,0}\in[18,28]$ °C; calls `_generate_outdoor_temp_profile()` |
-| `_generate_outdoor_temp_profile()` | Builds `outdoor_temp_array[0..max_steps]` — sinusoidal (peak 15:00), constant, or step-change |
-| `step(action)` | Clips action; computes $Q_{hvac}$; one Euler step of the ODE; increments `current_step`; returns `(T_{in}, T_{out}, done)` |
-| `get_state()` | Snapshot dict: `indoor_temp`, `outdoor_temp`, `setpoint_temp`, `temp_error`, `hvac_power`, `current_step`, `elapsed_hours` — passed through as Gymnasium `info` |
-| `elapsed_hours` | Property: `current_step × dt / 3600` |
-
-### `hvac_environment.py` — `HVACControlEnv`
-
-Thin Gymnasium wrapper around `ThermalZoneSimulator`.  Its three
-responsibilities are: **observation engineering**, **reward computation**,
-and **Gymnasium API compliance**.
-
-#### Observation pipeline (`_get_observation`)
-
-```
-Simulator state
-  ├─ indoor_temp, setpoint_temp  →  temp_error = T_in − T_set          [-50..50 °C]
-  ├─ outdoor_temp_array[step]    →  outdoor_norm = (T_out−T_base)/A    [-1..1]
-  └─ elapsed_hours               →  angle = 2π·h/24
-                                      sin_time = sin(angle)             [-1..1]
-                                      cos_time = cos(angle)             [-1..1]
-```
-
-The four features give the agent all information it needs:
-- **temp_error** — how far off-target it is right now
-- **outdoor_norm** — current heat load from outside
-- **sin/cos time** — where it is in the diurnal cycle (anticipatory control)
-
-#### Reward computation (`step`)
-
-```python
-# hvac_environment.py  —  HVACControlEnv.step()
-temperature_error = abs(indoor_temp - self.simulator.setpoint_temp)
-energy_penalty    = self.lambda_weight * abs(action_value)
-reward            = -temperature_error - energy_penalty
-```
-
-This is the **only** value the RL algorithm uses to update its weights.
-The test scripts receive it from `env.step()` but discard it — they report
-physical metrics (MAE, RMSE, Wh) instead.
-
-| Method | Description |
-|--------|-------------|
-| `reset(seed)` | Calls `simulator.reset(seed)`; returns `(obs_4d, info_dict)` |
-| `step(action)` | Steps simulator; computes two-term reward; returns Gymnasium 5-tuple |
-| `_get_observation()` | Returns `np.float32` array `[temp_error, outdoor_norm, sin_time, cos_time]` |
-| `_get_info()` | Returns `simulator.get_state()` dict |
-| `render()` | One-line console summary when `render_mode='human'` |
-
-### Training scripts `train_*.py`
-
-All four follow the same pattern:
-
-```python
-# 1. Create vectorised training env + VecNormalize
-env = make_vec_env(make_env, n_envs=N, seed=42)
-env = VecNormalize(env, norm_obs=True, norm_reward=<True/False>)
-
-# 2. Eval env (training=False prevents stat drift during evaluation)
-eval_env = VecNormalize(make_vec_env(...), norm_obs=True, norm_reward=False, training=False)
-
-# 3. Callbacks: sync normalisation stats + periodic evaluation
-callbacks = [SyncNormCallback(env, eval_env), EvalCallback(eval_env, ...)]
-
-# 4. Train and save
-model.learn(total_timesteps=500_000, callback=callbacks)
-model.save(...)
-env.save("vecnormalize.pkl")
-```
-
-### Test scripts `test_*.py`
-
-Load `best_model.zip` (or `final_model.zip`), run one deterministic 24-hour
-episode, print statistics, and save a two-panel figure:
-
-- **Top:** indoor temp vs outdoor temp vs setpoint (with ±0.5 °C comfort band)
-- **Bottom:** HVAC power over time (blue = cooling, red = heating)
-
-Note: the reward is received from `env.step()` but **not used** — evaluation
-reports physical metrics that directly measure what the reward was designed to
-proxy (see [Reward Function](#reward-function) above).
 
 ---
 
@@ -344,3 +543,4 @@ proxy (see [Reward Function](#reward-function) above).
 
 - [Stable-Baselines3 docs](https://stable-baselines3.readthedocs.io/)
 - [Gymnasium docs](https://gymnasium.farama.org/)
+- [EPA Meteorological Data (SAMSON/PRZM format)](https://www.epa.gov/ceam/meteorological-data-samson-and-related-files)
