@@ -4,7 +4,7 @@ HVACControlEnv — Gymnasium wrapper for ThermalZoneSimulator
 Uses real EPA hourly weather data (Syracuse for training, Albany for testing)
 with domain-randomised building parameters per episode.
 
-Observation  (12-dim, float32)
+Observation  (14-dim, float32)
 ──────────────────────────────
   [0]  temp_error    °C        T_in − T_set
   [1]  outdoor_norm            (T_out − 20) / 20  clipped ∈ [−2, 2]
@@ -18,11 +18,13 @@ Observation  (12-dim, float32)
   [9]  C_ratio                 C / C_nominal              ∈ [≈0.57, ≈1.43]
   [10] U_ratio                 U / U_nominal              ∈ [≈0.55, ≈1.45]
   [11] prev_action             previous HVAC command      ∈ [−1, 1]
+  [12] COP_norm                COP / 10.0                 ∈ [0.08, 1.0]
+  [13] U_eff_norm              U_eff / 150.0              ∈ [0.0, 1.0]
 
-Reward  (cost-aware)
-────────────────────
+Reward  (cost-aware, COP-adjusted)
+──────────────────────────────────
   R = −(w_c · |T_in − T_set|
-        + w_e · |a_t| · (price / max_price)
+        + w_e · (|a_t| / COP) · (price / max_price)
         + w_s · |a_t − a_{t−1}|)
 
   Default weights: w_c = 1.0, w_e = 0.1, w_s = 0.05
@@ -92,10 +94,10 @@ class HVACControlEnv(gym.Env):
             low=-1.0, high=1.0, shape=(1,), dtype=np.float32
         )
 
-        # ── Observation space (12-dim) ───────────────────────────────────
-        #         [err, out, sin_h, cos_h, sin_y, cos_y, price, solar, wind, C, U, prev_a]
-        low  = np.array([-50, -2, -1, -1, -1, -1,  0,  0,  0,  0.2, 0.2, -1], dtype=np.float32)
-        high = np.array([ 50,  2,  1,  1,  1,  1,  1,  1,  1,  1.8, 1.8,  1], dtype=np.float32)
+        # ── Observation space (14-dim) ───────────────────────────────────
+        #         [err, out, sin_h, cos_h, sin_y, cos_y, price, solar, wind, C, U, prev_a, cop, u_eff]
+        low  = np.array([-50, -2, -1, -1, -1, -1,  0,  0,  0,  0.2, 0.2, -1,  0.0, 0.0], dtype=np.float32)
+        high = np.array([ 50,  2,  1,  1,  1,  1,  1,  1,  1,  1.8, 1.8,  1,  1.0, 1.0], dtype=np.float32)
         self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
 
     # ------------------------------------------------------------------
@@ -142,7 +144,7 @@ class HVACControlEnv(gym.Env):
 
     def _compute_reward(self, indoor_temp: float, action: float) -> float:
         comfort = abs(indoor_temp - self.simulator.setpoint_temp)
-        energy  = abs(action) * (self._current_price / self._max_price)  # ∈ [0, 1]
+        energy  = (abs(action) / self.simulator.current_cop) * (self._current_price / self._max_price)
         slew    = abs(action - self._prev_action)                         # ∈ [0, 2]
         return -(
             self.comfort_weight * comfort
@@ -174,7 +176,9 @@ class HVACControlEnv(gym.Env):
         return np.array(
             [temp_error,  outdoor_norm, sin_hour, cos_hour,
              sin_year,    cos_year,     price_norm, solar_norm,
-             wind_norm,   sim.C_ratio,  sim.U_ratio, self._prev_action],
+             wind_norm,   sim.C_ratio,  sim.U_ratio, self._prev_action,
+             float(np.clip(sim.current_cop / 10.0, 0.0, 1.0)),
+             float(np.clip(sim.current_U_eff / 150.0, 0.0, 1.0))],
             dtype=np.float32,
         )
 

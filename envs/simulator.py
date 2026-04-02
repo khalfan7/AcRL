@@ -1,7 +1,8 @@
 """
 Lumped-capacitance (RC) thermal simulator
 ==========================================
-Extended physics with real weather data, solar gain, wind-modified U,
+Extended physics with real weather data, solar gain, nonlinear
+infiltration model (power-law wind + stack effect), Carnot-based COP,
 and per-episode domain randomisation of C and U.
 
 Governing ODE (Euler forward, step Δt = control_timestep seconds):
@@ -10,12 +11,15 @@ Governing ODE (Euler forward, step Δt = control_timestep seconds):
 
 where:
     C       = thermal_capacitance  [J/°C]   — randomised ∈ [C_min, C_max]
-    U_eff   = U · (1 + k_w · wind_speed)   — wind-modified envelope conductance
-    U       = heat_transfer_coeff  [W/°C]   — randomised ∈ [U_min, U_max]
-    k_w     = wind_coeff           [s/m]
+    U_eff   = U_cond + k_wind·v^n_wind + k_stack·√|T_in − T_out|
+    U_cond  = heat_transfer_coeff  [W/°C]   — randomised ∈ [U_min, U_max]
     α       = solar_gain_coeff     [m²]     — effective aperture × absorptance
     GHI     = Global Horizontal Irradiance  [Wh/m²] (from weather data)
     Q_hvac  = action × max_hvac_power [W]  — +ve = cooling, -ve = heating
+
+COP model (Carnot-based, η = 0.4, clipped [0.8, 10]):
+    COP_cool = η · T_in_K  / max(T_out_K − T_in_K, ε)
+    COP_heat = η · T_in_K  / max(T_in_K − T_out_K, ε)
 
 Domain randomisation
 --------------------
@@ -66,7 +70,14 @@ class ThermalZoneSimulator:
         U_max: float =     80.0,
         # Extended physics
         solar_gain_coeff: float = 0.5,          # m² (aperture × absorptance)
-        wind_coeff:       float = 0.05,          # s/m
+        # Nonlinear infiltration (power-law wind + stack effect)
+        n_wind:  float = 0.65,                   # wind power-law exponent
+        k_wind:  float = 4.45,                   # W/°C per (m/s)^n_wind
+        k_stack: float = 2.6,                     # W/°C per √°C
+        # HVAC COP model
+        eta_cop:  float = 0.4,                    # Carnot efficiency factor
+        cop_min:  float = 0.8,
+        cop_max:  float = 10.0,
     ):
         self._weather          = weather_df.reset_index(drop=True)
         self._n_hours          = len(self._weather)
@@ -85,7 +96,12 @@ class ThermalZoneSimulator:
         self.U_nominal = (U_min + U_max) / 2.0   #      55 W/°C
 
         self.solar_gain_coeff = solar_gain_coeff
-        self.wind_coeff       = wind_coeff
+        self.n_wind   = n_wind
+        self.k_wind   = k_wind
+        self.k_stack  = k_stack
+        self.eta_cop  = eta_cop
+        self.cop_min  = cop_min
+        self.cop_max  = cop_max
 
         # Episode state — properly initialised by reset()
         self.thermal_capacitance: float = self.C_nominal
@@ -99,6 +115,10 @@ class ThermalZoneSimulator:
         self._ep_weather: pd.DataFrame = self._weather.iloc[:episode_hours + 1].copy()
         self._last_weather: dict = self._row_to_dict(self._weather.iloc[0])
         self._rng: Generator = np.random.default_rng()
+
+        # Nonlinear state exposed to environment
+        self.current_U_eff: float = float(self.U_nominal)
+        self.current_cop:   float = 5.0
 
         # Stratified seasonal sampling — pre-compute valid start indices per quartile
         self._season_starts = self._build_season_indices()
@@ -160,7 +180,28 @@ class ThermalZoneSimulator:
         w = self._current_weather()
         self._last_weather = w
 
-        U_eff   = self.heat_transfer_coeff * (1.0 + self.wind_coeff * w["wind_speed"])
+        # Nonlinear infiltration: conduction + power-law wind + stack effect
+        v = max(w["wind_speed"], 0.0)
+        delta_T = abs(self.indoor_temp - w["T_out"])
+        U_eff = (
+            self.heat_transfer_coeff
+            + self.k_wind * (v ** self.n_wind)
+            + self.k_stack * (delta_T ** 0.5)
+        )
+        self.current_U_eff = U_eff
+
+        # Carnot-based COP (mode selected by sign of action)
+        # Cooling: COP = η·T_in_K / max(T_out_K − T_in_K, ε)  — degrades as outdoor gets hotter
+        # Heating: COP = η·T_in_K / max(T_in_K − T_out_K, ε)  — degrades as outdoor gets colder
+        eps = 1.0  # avoid division by zero
+        T_in_K  = self.indoor_temp + 273.15
+        T_out_K = w["T_out"] + 273.15
+        if action >= 0:  # cooling
+            cop = self.eta_cop * T_in_K / max(T_out_K - T_in_K, eps)
+        else:            # heating
+            cop = self.eta_cop * T_in_K / max(T_in_K - T_out_K, eps)
+        self.current_cop = float(np.clip(cop, self.cop_min, self.cop_max))
+
         Q_solar = self.solar_gain_coeff * w["GHI"]
 
         dT = (self.control_timestep / self.thermal_capacitance) * (
@@ -190,6 +231,8 @@ class ThermalZoneSimulator:
             "doy":           float(w["doy"]),
             "C_ratio":       self.C_ratio,
             "U_ratio":       self.U_ratio,
+            "current_cop":   self.current_cop,
+            "current_U_eff": self.current_U_eff,
         }
 
     @property

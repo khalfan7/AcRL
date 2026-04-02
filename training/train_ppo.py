@@ -26,7 +26,7 @@ if __name__ == '__main__':
     # ── Config ────────────────────────────────────────────────────────────
     n_envs          = 8
     total_timesteps = 500_000
-    log_dir = str(_ROOT / "results" / "PPO")
+    log_dir = str(_ROOT / "results" / "PPO_nl")
     Path(log_dir).mkdir(parents=True, exist_ok=True)
 
     # ── Training envs (on-policy: multiple parallel envs help) ────────────

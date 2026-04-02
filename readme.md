@@ -5,6 +5,11 @@ indoor temperature of a physics-based thermal zone using **real EPA hourly
 weather data**, **electricity pricing**, and **domain randomisation** — balancing
 thermal comfort, energy cost, and actuator smoothness.
 
+The simulator features **nonlinear dynamics**: Carnot-based HVAC coefficient of
+performance (COP) that degrades with temperature lift, and a three-term
+infiltration model combining conduction, power-law wind, and buoyancy-driven
+stack effect.
+
 ---
 
 ## End-to-End Pipeline
@@ -43,7 +48,8 @@ trained, evaluated policy.
 │  • On step(action):                                                  │
 │      Euler forward:                                                  │
 │        T_in += (Δt/C)·[U_eff·(T_out−T_in) + α·GHI − Q_hvac]       │
-│      where U_eff = U·(1 + k_w·wind)                                 │
+│      where U_eff = U_cond + k_wind·v^0.65 + k_stack·√|ΔT|          │
+│      Carnot COP computed per step (clipped [0.8, 10])                │
 │                                                                      │
 └──────────────────────────────┬───────────────────────────────────────┘
                                │
@@ -53,8 +59,8 @@ trained, evaluated policy.
 │  HVACControlEnv  (envs/environment.py)                               │
 │  ─────────────────────────────────────                               │
 │  • Wraps simulator, adds pricing                                     │
-│  • Builds 12-dim observation   (see Observation Space below)         │
-│  • Computes 3-term reward      (see Reward Function below)           │
+│  • Builds 14-dim observation   (see Observation Space below)         │
+│  • Computes 3-term reward with COP (see Reward Function below)       │
 │  • Factories: make_train_env() / make_test_env()                     │
 │                                                                      │
 └──────────────────────────────┬───────────────────────────────────────┘
@@ -84,7 +90,7 @@ trained, evaluated policy.
 | **4 — Wrap as Gym env** | `envs/environment.py` | Adds observation engineering (12-dim), cost-aware reward, Gymnasium API. Factory functions wire everything together |
 | **5 — Train** | `training/train_*.py` | Vectorised envs + VecNormalize + SB3 algorithm. 500k steps with eval callbacks. Saves `best_model.zip` + `vecnormalize.pkl` |
 | **6 — Evaluate** | `evaluation/test_*.py` | Loads trained model, runs **100 episodes** (25 per season via stratified round-robin) on **Albany** (unseen city). Reports overall + per-season stats, saves CSV, boxplots, and representative 24h traces |
-| **7 — Compare** | `evaluation/plot_convergence.py` | Reads `evaluations.npz` from each algorithm, plots learning curves side-by-side |
+| **7 — Compare** | `evaluation/generalization.py` | Reads `evaluations.npz` and generalization CSVs, produces convergence curves, energy–comfort scatter, generalization heatmap, and radar chart |
 
 ---
 
@@ -103,23 +109,55 @@ step ($\Delta t = 300$ s):
 
 $$\frac{dT_{in}}{dt} = \frac{1}{C}\bigl[U_{eff}(T_{out} - T_{in}) + \alpha \cdot GHI - Q_{hvac}\bigr]$$
 
-where $U_{eff} = U \cdot (1 + k_w \cdot v_{wind})$.
+where the effective conductance is a **nonlinear three-term model**:
+
+$$U_{eff} = U_{cond} + k_{wind} \cdot v^{n_{wind}} + k_{stack} \cdot \sqrt{|T_{in} - T_{out}|}$$
+
+- **$U_{cond}$** — conduction through the envelope (randomised per episode)
+- **Power-law wind** — empirical infiltration scaling ($n_{wind} = 0.65$)
+- **Stack effect** — buoyancy-driven infiltration proportional to $\sqrt{\Delta T}$
+
+The stack term makes $U_{eff}$ depend on $T_{in}$, making the ODE genuinely
+nonlinear in state.
 
 | Symbol | Parameter | Default / Range | Physical meaning |
 |--------|-----------|-----------------|------------------|
 | $C$ | `thermal_capacitance` | $\sim\mathcal{U}(200\,000,\;500\,000)$ J/°C | Thermal mass of the zone (walls, air, furniture) |
-| $U$ | `heat_transfer_coeff` | $\sim\mathcal{U}(30,\;80)$ W/°C | Envelope conductance (randomised per episode) |
-| $U_{eff}$ | effective conductance | — | Wind-modified: higher wind → more infiltration / convection |
-| $k_w$ | `wind_coeff` | 0.05 s/m | Wind speed amplification factor |
+| $U_{cond}$ | `heat_transfer_coeff` | $\sim\mathcal{U}(30,\;80)$ W/°C | Envelope conductance (randomised per episode) |
+| $k_{wind}$ | `k_wind` | 4.45 W/°C per (m/s)$^{n}$ | Wind infiltration coefficient |
+| $n_{wind}$ | `n_wind` | 0.65 | Wind power-law exponent |
+| $k_{stack}$ | `k_stack` | 2.6 W/°C per √°C | Stack-effect infiltration coefficient |
 | $\alpha$ | `solar_gain_coeff` | 0.5 m² | Effective aperture × absorptance |
 | $GHI$ | Global Horizontal Irradiance | from weather (Wh/m²) | Solar heat gain through glazing |
 | $Q_{hvac}$ | `action × max_hvac_power` | ±3 000 W | Controlled input from HVAC |
 | $T_{out}$ | dry-bulb temperature | from weather (°C) | Disturbance signal |
 | $T_{in}$ | `indoor_temp` | randomised ±4 °C | Controlled variable |
 
+### 1.1b  HVAC Coefficient of Performance (COP)
+
+The energy cost of HVAC is no longer linear in action magnitude.  A Carnot-
+based COP model captures how heat-pump efficiency degrades with temperature
+lift ($\eta = 0.4$, clipped to $[0.8,\; 10]$):
+
+$$COP_{cool} = \eta \cdot \frac{T_{in,K}}{\max(T_{out,K} - T_{in,K},\; \varepsilon)}$$
+
+$$COP_{heat} = \eta \cdot \frac{T_{in,K}}{\max(T_{in,K} - T_{out,K},\; \varepsilon)}$$
+
+Mode is selected by the sign of the action (positive = cooling, negative =
+heating).  At a hot summer peak ($T_{out}=38°C$, $T_{in}=24°C$): $COP \approx
+8.5$, which is near-ideal.  At deep winter ($T_{out}=-10°C$, $T_{in}=22°C$):
+$COP \approx 3.7$, roughly $2.7\times$ the electricity cost per unit of
+thermal output.  The agent must learn to pre-condition (e.g. pre-cool when COP
+is high) rather than fight extreme lifts.
+
 **Why these choices?**
 - The RC model is simple enough for fast simulation (~1 μs per step) but
   captures the dominant thermal dynamics of a single zone.
+- The nonlinear $U_{eff}$ means the agent faces state-dependent dynamics:
+  the further $T_{in}$ drifts from $T_{out}$, the stronger the coupling
+  pulling it back — but also the higher the HVAC cost if fighting it.
+- COP-adjusted energy cost forces the agent to reason about *when* to run
+  the HVAC, not just *how much*.
 - Solar gain and wind effects add realism without requiring a full EnergyPlus
   co-simulation — the agent must learn that sunny afternoons cause overheating
   and that windy nights accelerate heat loss.
@@ -202,10 +240,12 @@ step(action)   ← called 288 times per episode (24h ÷ 5min)
   ├─ 1. Clip action to [-1, 1]
   ├─ 2. Q_hvac = action × 3000 W
   ├─ 3. Look up weather for current step (zero-order hold within hour)
-  ├─ 4. U_eff = U × (1 + k_w × wind_speed)
-  ├─ 5. Q_solar = α × GHI
-  ├─ 6. Euler step: T_in += (Δt/C) × [U_eff×(T_out−T_in) + Q_solar − Q_hvac]
-  ├─ 7. Increment step counter; check if done (step ≥ 288)
+  ├─ 4. U_eff = U_cond + k_wind×v^0.65 + k_stack×√|T_in−T_out|
+  ├─ 5. COP = Carnot(T_in, T_out, action_sign), clipped [0.8, 10]
+  ├─ 6. Q_solar = α × GHI
+  ├─ 7. Euler step: T_in += (Δt/C) × [U_eff×(T_out−T_in) + Q_solar − Q_hvac]
+  ├─ 8. Store current_cop, current_U_eff
+  ├─ 9. Increment step counter; check if done (step ≥ 288)
   └─ return (T_in, weather_dict, done)
 ```
 
@@ -217,7 +257,7 @@ The Gymnasium wrapper (`envs/environment.py`) sits between the simulator and
 the RL algorithm.  It has three jobs: **build the observation**, **compute the
 reward**, and **satisfy the Gymnasium API**.
 
-### 2.1  Observation Space (12-dimensional)
+### 2.1  Observation Space (14-dimensional)
 
 The observation is a dense `float32` vector assembled from the simulator state
 plus pricing data.  Every feature is either normalised to a bounded range or
@@ -237,6 +277,8 @@ already unitless:
 | 9 | `C_ratio` | $C / C_{nominal}$ | \[≈0.57, ≈1.43\] | Building thermal mass |
 | 10 | `U_ratio` | $U / U_{nominal}$ | \[≈0.55, ≈1.45\] | Building conductance |
 | 11 | `prev_action` | last HVAC command | \[−1, 1\] | Enables slew penalty |
+| 12 | `COP_norm` | $COP / 10$ | \[0.08, 1.0\] | Current heat-pump efficiency |
+| 13 | `U_{eff\_norm}$ | $U_{eff} / 150$ | \[0, 1\] | Current effective conductance |
 
 **Design rationale:**
 
@@ -246,6 +288,8 @@ already unitless:
   it can reduce power during expensive months and compensate during cheap ones.
 - **C_ratio / U_ratio** inform the agent about the building it is currently
   controlling (varies per episode via domain randomisation).
+- **COP_norm / U_eff_norm** let the agent *see* its current operating
+  regime — it can learn to exploit high-COP periods for pre-conditioning.
 - **prev_action** gives the agent memory of its last command so it can
   minimise the slew penalty.
 
@@ -420,14 +464,20 @@ The **seasonal profiles** figure gives qualitative insight — you can see how
 the agent responds to winter cold snaps vs summer heat waves, and whether it
 uses heating, cooling, or both appropriately.
 
-### 4.4  Convergence Comparison
+### 4.4  Report Figures
 
 ```bash
-python evaluation/plot_convergence.py
+python evaluation/generalization.py
 ```
 
-Reads `evaluations.npz` from each algorithm directory and plots mean eval
-reward ± std over training, saved to `results/training_convergence.png`.
+Generates four cross-algorithm comparison figures in `results/`:
+
+| Figure | File | What it shows |
+|--------|------|---------------|
+| Training convergence | `training_convergence.png` | Mean episode reward ± std over timesteps |
+| Energy–comfort trade-off | `energy_comfort_tradeoff.png` | MAE vs energy scatter with 2-σ confidence ellipses |
+| Generalization gap | `generalization_gap.png` | Annotated heatmap (algo × metric) |
+| Performance radar | `performance_radar.png` | Spider chart — outer ring = best per metric |
 
 ---
 
@@ -464,8 +514,8 @@ AcRL/
 │
 ├── envs/                              # Environment package
 │   ├── __init__.py                    #   exports HVACControlEnv, make_train_env, make_test_env
-│   ├── environment.py                 #   Gymnasium env: 12-dim obs, cost-aware reward
-│   ├── simulator.py                   #   RC thermal model, domain randomisation, stratified sampling
+│   ├── environment.py                 #   Gymnasium env: 14-dim obs, COP-adjusted reward
+│   ├── simulator.py                   #   Nonlinear RC thermal model, COP, domain randomisation
 │   ├── weather.py                     #   EPA .hNN hourly weather parser
 │   └── pricing.py                     #   Monthly electricity price loader
 │
@@ -479,12 +529,11 @@ AcRL/
 │
 ├── evaluation/                        # Testing & visualisation
 │   ├── __init__.py
-│   ├── generalization.py              #   100-episode evaluation engine (shared by all testers)
+│   ├── generalization.py              #   Evaluation engine + cross-algo report (merged)
 │   ├── test_ppo.py
 │   ├── test_sac.py
 │   ├── test_td3.py
-│   ├── test_a2c.py
-│   └── plot_convergence.py
+│   └── test_a2c.py
 │
 ├── Data/
 │   ├── Data_Syracuse_train/           # EPA .hNN files (1989–1990)
@@ -493,13 +542,14 @@ AcRL/
 │       └── newyork_monthly.txt        # NY residential electricity rates
 │
 └── results/                           # Generated during training/evaluation
-    ├── PPO/                           #   best_model.zip, vecnormalize.pkl, evaluations.npz,
-    │                                  #   generalization_stats_ppo.csv,
-    │                                  #   generalization_boxplots_ppo.png,
-    │                                  #   seasonal_profiles_ppo.png
+    ├── PPO/                           #   Linear-dynamics baseline models
     ├── SAC/
     ├── TD3/
-    └── A2C/
+    ├── A2C/
+    ├── PPO_nl/                        #   Nonlinear-dynamics models:
+    ├── SAC_nl/                        #   best_model.zip, vecnormalize.pkl,
+    ├── TD3_nl/                        #   evaluations.npz, generalization CSVs
+    └── A2C_nl/
 ```
 
 ---
@@ -530,8 +580,8 @@ python training/train_ppo.py
 # 2. Evaluate on Albany
 python evaluation/test_ppo.py
 
-# 3. Compare all algorithms
-python evaluation/plot_convergence.py
+# 3. Generate all comparison figures
+python evaluation/generalization.py
 
 # 4. TensorBoard (optional)
 tensorboard --logdir results/

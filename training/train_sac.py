@@ -30,7 +30,7 @@ from training.callbacks import SyncNormCallback
 if __name__ == '__main__':
     # ── Config ────────────────────────────────────────────────────────────
     total_timesteps = 500_000
-    log_dir = str(_ROOT / "results" / "SAC")
+    log_dir = str(_ROOT / "results" / "SAC_nl")
     Path(log_dir).mkdir(parents=True, exist_ok=True)
 
     # ── Training env ──────────────────────────────────────────────────────

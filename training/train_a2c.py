@@ -27,7 +27,7 @@ if __name__ == '__main__':
     # ── Config ────────────────────────────────────────────────────────────
     n_envs          = 8  # A2C benefits from many parallel workers
     total_timesteps = 500_000
-    log_dir = str(_ROOT / "results" / "A2C")
+    log_dir = str(_ROOT / "results" / "A2C_nl")
     Path(log_dir).mkdir(parents=True, exist_ok=True)
 
     # ── Training envs (SubprocVecEnv → true parallelism on CPU) ──────────

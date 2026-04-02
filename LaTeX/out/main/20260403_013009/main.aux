@@ -1,0 +1,105 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\citation{manjavacas2024drl_hvac,bekal2025continual_hvac,yu2025rl_urban_hvac}
+\citation{mnih2016a2c}
+\citation{schulman2017ppo}
+\citation{fujimoto2018td3}
+\citation{haarnoja2018sac}
+\@writefile{toc}{\contentsline {section}{\numberline {I}Introduction}{1}{section.1}\protected@file@percent }
+\newlabel{sec:introduction}{{I}{1}{Introduction}{section.1}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {II}Related Work}{1}{section.2}\protected@file@percent }
+\newlabel{sec:related-work}{{II}{1}{Related Work}{section.2}{}}
+\citation{manjavacas2024drl_hvac}
+\citation{bekal2025continual_hvac}
+\citation{yu2025rl_urban_hvac}
+\citation{manjavacas2024drl_hvac}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces EPA weather archives and New~York electricity tariffs feed a nonlinear lumped-capacitance thermal simulator with domain randomization and stratified seasonal sampling. The simulator exposes a Gymnasium environment with a 14-dimensional observation space, a continuous HVAC power action, and a three-term reward balancing comfort, COP-adjusted energy cost, and actuator smoothness. Four DRL agents (PPO, A2C, SAC, TD3) are trained for 500\,k steps on Syracuse weather and evaluated out-of-distribution on Albany over 100 deterministic episodes (25 per season). Resulting episode logs and trained checkpoints are post-processed into the comparative figures and tables of this paper.}}{2}{figure.1}\protected@file@percent }
+\newlabel{fig:pipeline}{{1}{2}{EPA weather archives and New~York electricity tariffs feed a nonlinear lumped-capacitance thermal simulator with domain randomization and stratified seasonal sampling. The simulator exposes a Gymnasium environment with a 14-dimensional observation space, a continuous HVAC power action, and a three-term reward balancing comfort, COP-adjusted energy cost, and actuator smoothness. Four DRL agents (PPO, A2C, SAC, TD3) are trained for 500\,k steps on Syracuse weather and evaluated out-of-distribution on Albany over 100 deterministic episodes (25 per season). Resulting episode logs and trained checkpoints are post-processed into the comparative figures and tables of this paper}{figure.1}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {III}System Model}{2}{section.3}\protected@file@percent }
+\newlabel{sec:system-model}{{III}{2}{System Model}{section.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-A}}Thermal Zone Dynamics}{2}{subsection.3.1}\protected@file@percent }
+\newlabel{subsec:thermal-dynamics}{{\mbox  {III-A}}{2}{Thermal Zone Dynamics}{subsection.3.1}{}}
+\newlabel{eq:thermal-ode}{{1}{2}{Thermal Zone Dynamics}{equation.1}{}}
+\newlabel{eq:ueff}{{2}{2}{Thermal Zone Dynamics}{equation.2}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {I}{\ignorespaces Thermal Simulator Parameters}}{2}{table.1}\protected@file@percent }
+\newlabel{tab:params}{{I}{2}{Thermal Simulator Parameters}{table.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-B}}Weather Data and Train/Test Split}{2}{subsection.3.2}\protected@file@percent }
+\newlabel{subsec:weather-data}{{\mbox  {III-B}}{2}{Weather Data and Train/Test Split}{subsection.3.2}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {II}{\ignorespaces 14-Dimensional Observation Space.}}{3}{table.2}\protected@file@percent }
+\newlabel{tab:obs}{{II}{3}{14-Dimensional Observation Space}{table.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {III-C}}Electricity Pricing}{3}{subsection.3.3}\protected@file@percent }
+\newlabel{subsec:pricing}{{\mbox  {III-C}}{3}{Electricity Pricing}{subsection.3.3}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {IV}Reinforcement Learning Formulation}{3}{section.4}\protected@file@percent }
+\newlabel{sec:rl-formulation}{{IV}{3}{Reinforcement Learning Formulation}{section.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-A}}Observation Space}{3}{subsection.4.1}\protected@file@percent }
+\newlabel{subsec:state-space}{{\mbox  {IV-A}}{3}{Observation Space}{subsection.4.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-B}}Action Space}{3}{subsection.4.2}\protected@file@percent }
+\newlabel{subsec:action-space}{{\mbox  {IV-B}}{3}{Action Space}{subsection.4.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-C}}Reward Function}{3}{subsection.4.3}\protected@file@percent }
+\newlabel{subsec:reward}{{\mbox  {IV-C}}{3}{Reward Function}{subsection.4.3}{}}
+\newlabel{eq:reward}{{3}{3}{Reward Function}{equation.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-D}}Domain Randomization}{3}{subsection.4.4}\protected@file@percent }
+\newlabel{subsec:domain-rand}{{\mbox  {IV-D}}{3}{Domain Randomization}{subsection.4.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {IV-E}}Stratified Seasonal Sampling}{3}{subsection.4.5}\protected@file@percent }
+\newlabel{subsec:seasonal-sampling}{{\mbox  {IV-E}}{3}{Stratified Seasonal Sampling}{subsection.4.5}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {III}{\ignorespaces Action Space}}{3}{table.3}\protected@file@percent }
+\newlabel{tab:action}{{III}{3}{Action Space}{table.3}{}}
+\citation{raffin2021sb3}
+\citation{schulman2017ppo}
+\citation{mnih2016a2c}
+\citation{haarnoja2018sac}
+\citation{fujimoto2018td3}
+\@writefile{toc}{\contentsline {section}{\numberline {V}Algorithms}{4}{section.5}\protected@file@percent }
+\newlabel{sec:algorithms}{{V}{4}{Algorithms}{section.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-A}}Proximal Policy Optimization (PPO)}{4}{subsection.5.1}\protected@file@percent }
+\newlabel{subsec:ppo}{{\mbox  {V-A}}{4}{Proximal Policy Optimization (PPO)}{subsection.5.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-B}}Advantage Actor-Critic (A2C)}{4}{subsection.5.2}\protected@file@percent }
+\newlabel{subsec:a2c}{{\mbox  {V-B}}{4}{Advantage Actor-Critic (A2C)}{subsection.5.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-C}}Soft Actor-Critic (SAC)}{4}{subsection.5.3}\protected@file@percent }
+\newlabel{subsec:sac}{{\mbox  {V-C}}{4}{Soft Actor-Critic (SAC)}{subsection.5.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {V-D}}Twin Delayed Deep Deterministic Policy Gradient (TD3)}{4}{subsection.5.4}\protected@file@percent }
+\newlabel{subsec:td3}{{\mbox  {V-D}}{4}{Twin Delayed Deep Deterministic Policy Gradient (TD3)}{subsection.5.4}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {VI}Experimental Setup}{4}{section.6}\protected@file@percent }
+\newlabel{sec:experimental-setup}{{VI}{4}{Experimental Setup}{section.6}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-A}}Training Configuration}{4}{subsection.6.1}\protected@file@percent }
+\newlabel{subsec:training-config}{{\mbox  {VI-A}}{4}{Training Configuration}{subsection.6.1}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {IV}{\ignorespaces Training Hyperparameters}}{4}{table.4}\protected@file@percent }
+\newlabel{tab:hyperparams}{{IV}{4}{Training Hyperparameters}{table.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VI-B}}Evaluation Protocol}{4}{subsection.6.2}\protected@file@percent }
+\newlabel{subsec:eval-protocol}{{\mbox  {VI-B}}{4}{Evaluation Protocol}{subsection.6.2}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {VII}Results}{4}{section.7}\protected@file@percent }
+\newlabel{sec:results}{{VII}{4}{Results}{section.7}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VII-A}}Learning Curves}{4}{subsection.7.1}\protected@file@percent }
+\newlabel{subsec:learning-curves}{{\mbox  {VII-A}}{4}{Learning Curves}{subsection.7.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VII-B}}Generalization Performance}{4}{subsection.7.2}\protected@file@percent }
+\newlabel{subsec:generalisation}{{\mbox  {VII-B}}{4}{Generalization Performance}{subsection.7.2}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Mean evaluation reward during 500k-step training with interquartile range shading.}}{4}{figure.2}\protected@file@percent }
+\newlabel{fig:convergence}{{2}{4}{Mean evaluation reward during 500k-step training with interquartile range shading}{figure.2}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces Median MAE (\si {\degreeCelsius }) on Albany (out-of-distribution) over 25 episodes per season. Lower is better.}}{5}{figure.3}\protected@file@percent }
+\newlabel{fig:albany-heatmap}{{3}{5}{Median MAE (\si {\degreeCelsius }) on Albany (out-of-distribution) over 25 episodes per season. Lower is better}{figure.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {V}{\ignorespaces Median Albany Performance (100 OOD Episodes)}}{5}{table.5}\protected@file@percent }
+\newlabel{tab:results}{{V}{5}{Median Albany Performance (100 OOD Episodes)}{table.5}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces Percentage change in median performance when transferring from Syracuse (training) to Albany (test). Positive values indicate worse transfer performance on Albany; comfort is reported as loss in percentage points.}}{5}{figure.4}\protected@file@percent }
+\newlabel{fig:gap}{{4}{5}{Percentage change in median performance when transferring from Syracuse (training) to Albany (test). Positive values indicate worse transfer performance on Albany; comfort is reported as loss in percentage points}{figure.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VII-C}}Seasonal Analysis}{5}{subsection.7.3}\protected@file@percent }
+\newlabel{subsec:seasonal}{{\mbox  {VII-C}}{5}{Seasonal Analysis}{subsection.7.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {\mbox  {VII-D}}Discussion}{5}{subsection.7.4}\protected@file@percent }
+\newlabel{subsec:discussion}{{\mbox  {VII-D}}{5}{Discussion}{subsection.7.4}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {VIII}Conclusion}{5}{section.8}\protected@file@percent }
+\newlabel{sec:conclusion}{{VIII}{5}{Conclusion}{section.8}{}}
+\bibstyle{IEEEtran}
+\bibdata{references}
+\bibcite{manjavacas2024drl_hvac}{1}
+\bibcite{bekal2025continual_hvac}{2}
+\bibcite{yu2025rl_urban_hvac}{3}
+\bibcite{mnih2016a2c}{4}
+\bibcite{schulman2017ppo}{5}
+\bibcite{fujimoto2018td3}{6}
+\bibcite{haarnoja2018sac}{7}
+\bibcite{raffin2021sb3}{8}
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces Representative winter and summer Albany episodes for TD3. Left: indoor and outdoor temperature traces with the $\pm \SI {0.5}{\degreeCelsius }$ comfort band in green. Right: HVAC power profile for each season.}}{6}{figure.5}\protected@file@percent }
+\newlabel{fig:traces}{{5}{6}{Representative winter and summer Albany episodes for TD3. Left: indoor and outdoor temperature traces with the $\pm \SI {0.5}{\degreeCelsius }$ comfort band in green. Right: HVAC power profile for each season}{figure.5}{}}
+\@writefile{toc}{\contentsline {section}{References}{6}{section*.1}\protected@file@percent }
+\gdef \@abspage@last{6}
